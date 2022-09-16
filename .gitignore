@@ -1,2 +1,4 @@
-/bin
-/config*.yaml
+cmd/gdrive/gdrive
+**/credentials.json
+**/oauth_token.json
+.idea

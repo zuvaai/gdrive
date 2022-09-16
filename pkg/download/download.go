@@ -29,7 +29,6 @@ type downloadConfig struct {
 	TokenFile string `mapstructure:"token_file"`
 	Src       string `mapstructure:"src"`
 	Dst       string `mapstructure:"dst"`
-	ListFile  string `mapstructure:"list_file"` // save file list meta
 }
 
 func loadConfig() (*downloadConfig, error) {
@@ -63,10 +62,10 @@ func GetCmd() *cobra.Command {
 	}
 
 	flags := cmd.Flags()
-	flags.String("cred_file", "", "credentials.json file for Google Drive API from gcloud console \nhttps://console.developers.google.com/apis/library/drive.googleapis.com")
+	flags.String("cred_file", "credentials.json", "credentials.json file for Google Drive API from gcloud console \nhttps://console.developers.google.com/apis/library/drive.googleapis.com")
 	flags.String("src", "", "Source fileId in google drive")
 	flags.String("dst", "", "Destination directory")
-	flags.String("token_file", "", "token file that stores access and refresh tokens, and is created automatically")
+	flags.String("token_file", "oauth_token.json", "token file that stores access and refresh tokens, and is created automatically")
 	flags.String("list_file", "", "list of files to be downloaded, will be created automatically")
 
 	_ = cmd.MarkFlagRequired("src")
@@ -124,20 +123,14 @@ func onRunDownload(cmd *cobra.Command, args []string, config *downloadConfig) {
 
 	var fileTasks []Task
 
-	fileTasks, err = loadListFile(config.ListFile)
+	fileTasks, err = listDriveFolderFiles(service, root)
 	if err != nil {
-		log.Printf("Load list file err = %v", err)
-		fileTasks, err = listDriveFolderFiles(service, root)
-		if err != nil {
-			log.Printf("list files: err = %v", err)
-			return
-		}
-		// save lists
-		_ = saveListFile(fileTasks, config.ListFile)
+		log.Printf("list files: err = %v", err)
+		return
 	}
 
 	total := len(fileTasks)
-	log.Printf("Total files: %d", total)
+	log.Printf("Number of files: %d", total)
 
 	for i, task := range fileTasks {
 		idx := i + 1
@@ -162,46 +155,8 @@ func onRunDownload(cmd *cobra.Command, args []string, config *downloadConfig) {
 		}
 		fileTasks[i].Done = true
 
-		// save list file periodically
-		if idx%10 == 0 {
-			_ = saveListFile(fileTasks, config.ListFile)
-		}
 	}
 
-	// save list file
-	_ = saveListFile(fileTasks, config.ListFile)
-}
-
-func loadListFile(listFile string) ([]Task, error) {
-	fin, err := os.Open(listFile)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to open list file: %s, err = %w", listFile, err)
-	}
-	defer fin.Close()
-	var tasks []Task
-	decoder := json.NewDecoder(fin)
-	err = decoder.Decode(&tasks)
-	if err != nil {
-		return nil, fmt.Errorf("Unable to decode list file: %s, err = %w", listFile, err)
-	}
-	return tasks, nil
-}
-
-func saveListFile(fileTasks []Task, listFile string) error {
-	fout, err := os.Create(listFile)
-	if err != nil {
-		return fmt.Errorf("Unable create list file: %s, err = %w", listFile, err)
-	}
-	defer fout.Close()
-
-	encoder := json.NewEncoder(fout)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(fileTasks)
-	if err != nil {
-		return fmt.Errorf("Marshal tasks err = %w", err)
-	}
-
-	return nil
 }
 
 func listDriveFolderFiles(service *drive.Service, rootFolder Task) ([]Task, error) {
@@ -214,7 +169,7 @@ func listDriveFolderFiles(service *drive.Service, rootFolder Task) ([]Task, erro
 		task := frontElem.Value.(Task)
 		// get meta data
 		driveFile := service.Files.Get(task.FileId)
-		currFile, err := driveFile.Fields("id,name,mimeType,md5Checksum").Do()
+		currFile, err := driveFile.Fields("id,name,mimeType,md5Checksum").SupportsAllDrives(true).Do()
 		if err != nil {
 			return nil, fmt.Errorf("get fileId: %s, err = %v", task.FileId, err)
 		}
@@ -262,6 +217,8 @@ func listDriveFolder(service *drive.Service, folderId string, handler func(*driv
 			Corpora("user").
 			Q(fmt.Sprintf("'%s' in parents", folderId)).
 			Fields("nextPageToken, files(id,name,mimeType,md5Checksum)").
+			IncludeItemsFromAllDrives(true).
+			SupportsAllDrives(true).
 			Do()
 		if err != nil {
 			return fmt.Errorf("Unable to list files, err = %w", err)
@@ -286,7 +243,7 @@ func listDriveFolder(service *drive.Service, folderId string, handler func(*driv
 }
 
 func downloadDriveFile(service *drive.Service, task Task) error {
-	driveFile := service.Files.Get(task.FileId)
+	driveFile := service.Files.Get(task.FileId).SupportsAllDrives(true)
 	// check md5
 	dstFilePath := task.SavePath
 	dstFileMd5 := getFileMd5(dstFilePath)
