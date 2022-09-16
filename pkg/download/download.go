@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -132,30 +133,57 @@ func onRunDownload(cmd *cobra.Command, args []string, config *downloadConfig) {
 	total := len(fileTasks)
 	log.Printf("Number of files: %d", total)
 
-	for i, task := range fileTasks {
-		idx := i + 1
-		if task.Done {
-			log.Printf("Skipping: %05d / %05d, file: %s", idx, total, task.SavePath)
-			continue
-		}
-		percent := float64(idx) * 100.0 / float64(total)
-		log.Printf("Downloading: %05d / %05d (%.2f %%)", idx, total, percent)
-		for k := 1; k <= 5; k++ {
-			err = downloadDriveFile(service, task)
-			if err == nil {
-				break
-			}
-			sleepDuration := time.Duration(k*5) * time.Second
-			log.Printf("retry [%02d] in %v, err = %v", k, sleepDuration, err)
-			time.Sleep(sleepDuration)
-		}
-		if err != nil {
-			log.Printf("download err = %v", err)
-			break
-		}
-		fileTasks[i].Done = true
+	var taskChan = make(chan *Task)
+	var doneChan = make(chan bool)
+	var wg sync.WaitGroup
 
+	for i := 0; i < 10; i++ {
+		go func() {
+			wg.Add(1)
+			for task := range taskChan {
+
+				if task.Done {
+					log.Printf("Skipping file: %s", task.SavePath)
+					continue
+				}
+
+				for k := 1; k <= 5; k++ {
+					err = downloadDriveFile(service, *task)
+					if err == nil {
+						break
+					}
+					// Probably quota exceeded
+					sleepDuration := time.Duration(k*2) * time.Second
+					log.Printf("retry [%02d] in %v", k, sleepDuration)
+					time.Sleep(sleepDuration)
+				}
+				if err != nil {
+					log.Printf("download err = %v", err)
+					continue
+				}
+				task.Done = true
+				doneChan <- true
+
+			}
+			wg.Done()
+		}()
 	}
+
+	go func() {
+		doneCount := 0
+		for {
+			<-doneChan
+			doneCount++
+			log.Printf("Done: %d/%d (%.3f%%)", doneCount, total, float64(doneCount)/float64(total)*100)
+		}
+
+	}()
+	
+	for i := range fileTasks {
+		taskChan <- &fileTasks[i]
+	}
+	close(taskChan)
+	wg.Wait()
 
 }
 
